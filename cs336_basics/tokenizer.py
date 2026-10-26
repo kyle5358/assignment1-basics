@@ -12,12 +12,16 @@
 #         self.merges = merges if merges is not None else []
 #
 #     def train(self, input_path, vocab_size, special_tokens):
+class BPETokenizer:
+    def __init__(self, vocab, merges):
+        self.vocab = vocab
+        self.merges = merges
 
 import regex as re
-import os
-from multiprocessing import Pool
-import multiprocessing
-from pretokenization_example import find_chunk_boundaries
+# import os
+# from multiprocessing import Pool
+# import multiprocessing
+# from cs336_basics.pretokenization_example import find_chunk_boundaries
 
 # 预编译正则
 PAT = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
@@ -69,9 +73,10 @@ def process_text(text,special_tokens=None):
 #     return process_text(text,special_tokens)
 from collections import Counter
 import multiprocessing
-from pretokenization_example import find_chunk_boundaries
-
-def counting_init(input_path,specical_tokens,num_chunks=4):
+from cs336_basics.pretokenization_example import find_chunk_boundaries
+import time
+def counting_init(input_path,special_tokens,num_chunks=1000):
+    # start_time = time.time()
     with open(input_path,"rb") as f:
         boundaries = find_chunk_boundaries(
             f,
@@ -79,12 +84,22 @@ def counting_init(input_path,specical_tokens,num_chunks=4):
             split_special_token = b"<|endoftext|>"
         )
           # specical_tokens[0].encode("utf8")
+
+    # print(f"切块完成，耗时 {time.time() - start_time:.2f} 秒", flush=True)
+    # print(f"实际分块数：{len(boundaries) - 1}", flush=True)
+    # print(f"各块大小（MB）：", flush=True)
+    # print([
+    #     round((end - start) / 1024 / 1024, 2)
+    #     for start, end in zip(boundaries[:-1], boundaries[1:])
+    # ], flush=True)
+
     #为每个文本块创建任务
     tasks=[]
     for start, end in zip(boundaries[:-1], boundaries[1:]):
-        tasks.append((input_path,start,end,specical_tokens))
+        tasks.append((input_path,start,end,special_tokens))
     #并行处理文本块
-    with multiprocessing.Pool() as pool:
+    #with multiprocessing.Pool() as pool:
+    with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
         results=pool.starmap(process_chunk,tasks)
 
     #汇总词频
@@ -93,13 +108,40 @@ def counting_init(input_path,specical_tokens,num_chunks=4):
         final_word_counts.update(result)
 
     return dict(final_word_counts)
+
+import os
+import time
 #处理一个文本块 每个进程
 def process_chunk(input_path,start,end,special_tokens):
-    with open(input_path,'rb') as f:
-        f.seek(start)
-        text = f.read(end - start).decode('utf-8',errors='ignore')
-        return process_text(text,special_tokens)#返回词频
+    # with open(input_path,'rb') as f:
+    #     f.seek(start)
+    #     text = f.read(end - start).decode('utf-8',errors='ignore')
+    #     return process_text(text,special_tokens)#返回词频
+    # t0 = time.time()
+    # chunk_mb = (end - start) / 1024 / 1024
+    #
+    # print(
+    #     f"[PID {os.getpid()}] 开始处理 {chunk_mb:.2f} MB",
+    #     flush=True
+    # )
 
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        text = f.read(end - start).decode("utf-8", errors="ignore")
+
+    #t1 = time.time()
+    result = process_text(text, special_tokens)
+    #t2 = time.time()
+
+    # print(
+    #     f"[PID {os.getpid()}] 完成："
+    #     f"读取解码 {t1 - t0:.2f}s，"
+    #     f"预分词统计 {t2 - t1:.2f}s，"
+    #     f"词种数 {len(result)}",
+    #     flush=True
+    # )
+
+    return result
 #word_count 统计文本中单词的频率 {tuple(letter),count}
 #pairs_count
 #volcabu
@@ -108,7 +150,7 @@ def process_chunk(input_path,start,end,special_tokens):
 # vocab_size = 1257
 # special_tokens = ["<|endoftext|>"]
 
-def train_bpe(input_path, vocab_size, special_tokens):
+def train_bpe(input_path, vocab_size, special_tokens,num_chunks=1000):
 
     vocab= {i:bytes([i]) for i in range(256)}
 
@@ -116,13 +158,15 @@ def train_bpe(input_path, vocab_size, special_tokens):
         vocab[len(vocab)] = token.encode("utf-8")
 
     #初始化word_count
-    word_counts= counting_init(input_path,special_tokens)
+    word_counts= counting_init(input_path,special_tokens,num_chunks)
 
     pair_counts = count_pairs(word_counts)
+    pair_to_words = build_pair_to_words(word_counts)
     merges = []
 
     while len(vocab)<vocab_size:
         if not pair_counts:#有可能都合并完了，每个单词就一个token
+            print("训练提前结束：pair_counts 已经为空")
             break
 
         max_pair = max(
@@ -130,13 +174,14 @@ def train_bpe(input_path, vocab_size, special_tokens):
             key=lambda pair: (pair_counts[pair], pair)#def get_key(pair):return (pair_counts[pair], pair)
         )
 
-        word_counts = update_word_counts(word_counts, max_pair)
-
+        #word_counts = update_word_counts(word_counts, max_pair)
+        update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair)
         vocab[len(vocab)]=max_pair[0] + max_pair[1]
         merges.append(max_pair)#max_pair==(max_pair[0], max_pair[1])   eg('a','b')
-
-        pair_counts = count_pairs(word_counts)
-    return vocab,merges
+    print(f"最终词表大小: {len(vocab)}")
+    print(f"实际合并次数: {len(merges)}")
+        #pair_counts = count_pairs(word_counts)
+    return BPETokenizer(vocab, merges)
 
 
 def count_pairs(word_counts):
@@ -146,6 +191,65 @@ def count_pairs(word_counts):
             pair_counts[pair] = pair_counts.get(pair, 0) + count
     return pair_counts
 #print(count_pairs({(b'h', b'e', b'l', b'l', b'o'):2}))
+
+#建立反向索引
+def build_pair_to_words(word_counts):
+    pair_to_words={}
+    for word, count in word_counts.items():
+        for pair in zip(word[:-1], word[1:]):
+            if pair not in pair_to_words:
+                pair_to_words[pair] = set()
+            pair_to_words[pair].add(word)
+    return pair_to_words
+
+
+def update_pair_to_words(pair_to_words,old_word,new_word):
+    #删掉旧单词索引
+    for pair in set(zip(old_word[:-1], old_word[1:])):
+        if pair in pair_to_words:
+            pair_to_words[pair].remove(old_word)
+
+            if not pair_to_words[pair]:#键盘对应的集合为空
+                del pair_to_words[pair]
+
+        # words=pair_to_words.get(pair) #words={(d,o,g),(c,a,t)}
+        # if words is not None: #判断有没有找到这个 pair 对应的集合。
+        #     words.discard(old_word)
+        #
+        #     if not words:# 判断集合里面还有没有单词(word之前只有一个单词，现在被删为空了)
+        #         del pair_to_words[pair]
+        #
+        # if words is not None:
+        #     words.discard(old_word)
+        #
+        #     if word is None:
+        #         del pair_to_words[pair]
+
+    for pair in set(zip(new_word[:-1], new_word[1:])):
+        if pair not in pair_to_words:
+            pair_to_words[pair] = set()
+        pair_to_words[pair].add(new_word)
+
+def update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair):
+    affected_pairs=list(pair_to_words.get(max_pair,set()))
+    for old_word in affected_pairs:
+        counts=word_counts[old_word]
+        #扣除旧单词对所有相邻pair的贡献
+        for pair in zip(old_word[:-1], old_word[1:]):
+            pair_counts[pair]-=counts
+
+            if pair_counts[pair]==0:
+                del pair_counts[pair]
+        #2 合并旧单词
+        new_word=merge_single_word(old_word,max_pair)
+        #3 更新反向索引
+        update_pair_to_words(pair_to_words,old_word,new_word)
+        #4 更新单词词频
+        del word_counts[old_word]
+        word_counts[new_word]=word_counts.get(new_word,0)+counts
+        #5 加上新单词对所有相邻pair的贡献
+        for pair in zip(new_word[:-1], new_word[1:]):
+            pair_counts[pair]=pair_counts.get(pair,0)+counts
 
 def update_word_counts(word_counts, max_pair):
     new_word_counts = {}
@@ -181,13 +285,34 @@ def counting_init_single(input_path, special_tokens):
 #
 # print(single == parallel)
 if __name__ == "__main__":
-    # input_path = "../data/TinyStoriesV2-GPT4-train.txt"
-    # vocab_size = 50257
-    input_path = "../data/test.txt"
-    vocab_size = 1257
+    input_path = "../data/TinyStoriesV2-GPT4-train.txt"
+    #vocab_size = 50257
+    # input_path = "../data/test.txt"
+    vocab_size = 257
 
     special_tokens = ["<|endoftext|>"]
     print(train_bpe(input_path, vocab_size, special_tokens))
+
+    # word_counts = counting_init_single(input_path, special_tokens)
+    # pair_counts = count_pairs(word_counts)
+    # pair_to_words = build_pair_to_words(word_counts)
+    #
+    # max_pair = max(
+    #     pair_counts,
+    #     key=lambda pair: (pair_counts[pair], pair)
+    # )
+    #
+    # update_pair_counts(
+    #     word_counts, pair_counts, pair_to_words, max_pair
+    # )
+    #
+    # # 验证增量 pair 统计是否正确
+    # assert pair_counts == count_pairs(word_counts)
+    #
+    # # 验证反向索引是否正确
+    # assert pair_to_words == build_pair_to_words(word_counts)
+    #
+    # print("单轮增量更新验证通过！")
 
 # def train_bpe(input_path, vocab_size, special_tokens,num_chunks=1000):
 #     tokenizer=BPETokenizer()

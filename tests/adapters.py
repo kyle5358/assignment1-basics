@@ -8,7 +8,7 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
-
+from cs336_basics.tokenizer import train_bpe
 
 def run_linear(
     d_in: int,
@@ -572,21 +572,22 @@ def run_train_bpe(
     output its vocabulary and merges.
 
     Args:
-        input_path (str | os.PathLike): Path to BPE tokenizer training data.
-        vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
-        special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
+        训练数据 input_path (str | os.PathLike): Path to BPE tokenizer training data.
+        词表长度 vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
+        特殊标记 special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
             These strings will never be split into multiple tokens, and will always be
             kept as a single token. If these special tokens occur in the `input_path`,
             they are treated as any other string.
 
     Returns:
         tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-            vocab:
+            分词器词表 vocab:
                 The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
                 to bytes (token bytes)
-            merges:
+            哪两两合并 merges:
                 BPE merges. Each list item is a tuple of bytes (<token1>, <token2>),
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    tokenizer = train_bpe(input_path, vocab_size, special_tokens, **kwargs)
+    return tokenizer.vocab, tokenizer.merges
