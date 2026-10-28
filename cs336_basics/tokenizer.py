@@ -151,7 +151,7 @@ def process_chunk(input_path,start,end,special_tokens):
 # special_tokens = ["<|endoftext|>"]
 
 def train_bpe(input_path, vocab_size, special_tokens,num_chunks=1000):
-
+    changed_pairs = set()
     vocab= {i:bytes([i]) for i in range(256)}
 
     for token in special_tokens:
@@ -164,18 +164,34 @@ def train_bpe(input_path, vocab_size, special_tokens,num_chunks=1000):
     pair_to_words = build_pair_to_words(word_counts)
     merges = []
 
+    # 新增：当前最高频率，以及达到最高频率的候选 pair
+    #候选集合初始化
+    current_max_freq = max(pair_counts.values(), default=0)
+    candidates = { #满足条件的pair集合
+        pair
+        for pair, count in pair_counts.items()
+        if count == current_max_freq
+    }
+
     while len(vocab)<vocab_size:
         if not pair_counts:#有可能都合并完了，每个单词就一个token
             print("训练提前结束：pair_counts 已经为空")
             break
+        # ① 把上一轮变化的 pair 加入候选集合
+        candidates.update(changed_pairs)
+        changed_pairs.clear()
 
-        max_pair = max(
+        max_pair, candidates, current_max_freq = select_best_pair(
             pair_counts,
-            key=lambda pair: (pair_counts[pair], pair)#def get_key(pair):return (pair_counts[pair], pair)
+            candidates,
+            current_max_freq
         )
+        if max_pair is None:
+            print("训练提前结束，没有可合并的pair")
+            break
 
         #word_counts = update_word_counts(word_counts, max_pair)
-        update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair)
+        update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair,changed_pairs)
         vocab[len(vocab)]=max_pair[0] + max_pair[1]
         merges.append(max_pair)#max_pair==(max_pair[0], max_pair[1])   eg('a','b')
     print(f"最终词表大小: {len(vocab)}")
@@ -183,6 +199,34 @@ def train_bpe(input_path, vocab_size, special_tokens,num_chunks=1000):
         #pair_counts = count_pairs(word_counts)
     return BPETokenizer(vocab, merges)
 
+def select_best_pair(pair_counts,candidates,current_max_freq):
+    #更新pair_counts后，删掉已经不存在的pair
+    candidates={
+        pair
+        for pair in candidates
+        if pair in pair_counts
+    }
+    # 候选集合为空，或者候选中的最高频率低于当前记录
+    local_max=max((pair_counts[pair] for pair in candidates),default=0)
+    if local_max<current_max_freq:
+        current_max_freq = max(pair_counts.values(), default=0)
+        candidates = {  # 满足条件的pair集合
+            pair
+            for pair, count in pair_counts.items()
+            if count == current_max_freq
+        }
+    else:
+        # 只保留候选集合中达到当前最高频率的 pair
+        current_max_freq = local_max
+
+        candidates = {
+            pair for pair in candidates
+            if pair_counts[pair] == current_max_freq
+        }
+    if not candidates:
+        return None,candidates,current_max_freq
+    best_pair=max(candidates)
+    return best_pair,candidates,current_max_freq
 
 def count_pairs(word_counts):
     pair_counts={}
@@ -230,13 +274,15 @@ def update_pair_to_words(pair_to_words,old_word,new_word):
             pair_to_words[pair] = set()
         pair_to_words[pair].add(new_word)
 
-def update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair):
+def update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair,changed_pairs=None):
     affected_pairs=list(pair_to_words.get(max_pair,set()))
     for old_word in affected_pairs:
         counts=word_counts[old_word]
         #扣除旧单词对所有相邻pair的贡献
         for pair in zip(old_word[:-1], old_word[1:]):
             pair_counts[pair]-=counts
+            if changed_pairs is not None:
+                changed_pairs.add(pair)
 
             if pair_counts[pair]==0:
                 del pair_counts[pair]
@@ -247,9 +293,13 @@ def update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair):
         #4 更新单词词频
         del word_counts[old_word]
         word_counts[new_word]=word_counts.get(new_word,0)+counts
+
         #5 加上新单词对所有相邻pair的贡献
         for pair in zip(new_word[:-1], new_word[1:]):
             pair_counts[pair]=pair_counts.get(pair,0)+counts
+
+            if changed_pairs is not None:
+                changed_pairs.add(pair)
 
 def update_word_counts(word_counts, max_pair):
     new_word_counts = {}
@@ -284,6 +334,89 @@ def counting_init_single(input_path, special_tokens):
 # parallel = counting_init(input_path, special_tokens)
 #
 # print(single == parallel)
+
+import copy
+
+# def test_candidate_algorithm():
+#     # 1. 构造小型测试语料，不读 2GB 文件
+#     text = (
+#         "abababab abcabc abcabc "
+#         "banana banana bandana "
+#         "hello hello world world "
+#         "abab abc abc banana"
+#     )
+#
+#     word_counts = process_text(text, [])
+#
+#     pair_counts = count_pairs(word_counts)
+#     pair_to_words = build_pair_to_words(word_counts)
+#
+#     changed_pairs = set()
+#
+#     current_max_freq = max(pair_counts.values(), default=0)
+#     candidates = {
+#         pair
+#         for pair, count in pair_counts.items()
+#         if count == current_max_freq
+#     }
+#
+#     # 2. 逐轮比较
+#     for step in range(30):
+#         if not pair_counts:
+#             print("所有 pair 已合并完毕")
+#             break
+#
+#         # 原始全量扫描：作为正确答案
+#         expected = max(
+#             pair_counts,
+#             key=lambda pair: (pair_counts[pair], pair)
+#         )
+#
+#         # 候选集合优化算法
+#         candidates.update(changed_pairs)
+#         changed_pairs.clear()
+#
+#         actual, candidates, current_max_freq = select_best_pair(
+#             pair_counts,
+#             candidates,
+#             current_max_freq
+#         )
+#
+#         assert actual == expected, (
+#             f"第 {step + 1} 轮选择不一致！\n"
+#             f"原始算法：{expected}\n"
+#             f"优化算法：{actual}"
+#         )
+#
+#         # 执行同一轮合并
+#         update_pair_counts(
+#             word_counts,
+#             pair_counts,
+#             pair_to_words,
+#             actual,
+#             changed_pairs
+#         )
+#
+#         # 验证增量 pair 统计
+#         assert pair_counts == count_pairs(word_counts), (
+#             f"第 {step + 1} 轮 pair_counts 错误"
+#         )
+#
+#         # 验证倒排索引
+#         assert pair_to_words == build_pair_to_words(word_counts), (
+#             f"第 {step + 1} 轮 pair_to_words 错误"
+#         )
+#
+#         print(f"第 {step + 1} 轮通过：{actual}")
+#
+#     print("所有候选集合测试均通过！")
+
+# if __name__ == "__main__":
+#     test_candidate_algorithm()
+
+############encoding and decoding
+
+
 if __name__ == "__main__":
     input_path = "../data/TinyStoriesV2-GPT4-train.txt"
     #vocab_size = 50257
@@ -325,5 +458,4 @@ if __name__ == "__main__":
 #     )
 #     return tokenizer
 #     vocab, merges = run_train_bpe()
-
 
