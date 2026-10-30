@@ -42,10 +42,11 @@ def pre_tokenization(text,special_tokens):
     parts=re.split(special_pats,text)
 
     result=[]
+    special_set = set(special_tokens)#更快
     for part in parts:
         if not part:
             continue
-        if part in special_tokens:
+        if part in special_set:
             result.append(part)
         else:
             result.extend(PAT.findall(part))
@@ -60,8 +61,11 @@ def process_text(text,special_tokens=None):
         #如果是特殊字符就跳过不统计
         if word in special_tokens:
             continue
-        token=tuple(bytes([a]) for a in word.encode("utf8"))
-        word_counts[token] += 1
+        # token=tuple(bytes([a]) for a in word.encode("utf8"))
+        # token = tuple(word.encode("utf8"))
+        # word_counts[token] += 1
+        token_ids = tuple(word.encode("utf8"))
+        word_counts[token_ids] += 1
     return dict(word_counts)
 
 # print(process_text("hello hello world"))
@@ -97,9 +101,15 @@ def counting_init(input_path,special_tokens,num_chunks=1000):
     tasks=[]
     for start, end in zip(boundaries[:-1], boundaries[1:]):
         tasks.append((input_path,start,end,special_tokens))
+    #增加空任务检查 避免任务只有几个时却启动大量空闲进程
+    if not tasks:
+        return {}
+
+    process_count = min(multiprocessing.cpu_count(), len(tasks))
+
     #并行处理文本块
     #with multiprocessing.Pool() as pool:
-    with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
+    with multiprocessing.Pool(processes=process_count ) as pool:
         results=pool.starmap(process_chunk,tasks)
 
     #汇总词频
@@ -163,6 +173,7 @@ def train_bpe(input_path, vocab_size, special_tokens,num_chunks=1000):
     pair_counts = count_pairs(word_counts)
     pair_to_words = build_pair_to_words(word_counts)
     merges = []
+    merge_id_pairs = []
 
     # 新增：当前最高频率，以及达到最高频率的候选 pair
     #候选集合初始化
@@ -184,22 +195,34 @@ def train_bpe(input_path, vocab_size, special_tokens,num_chunks=1000):
         max_pair, candidates, current_max_freq = select_best_pair(
             pair_counts,
             candidates,
-            current_max_freq
+            current_max_freq,
+            vocab
         )
         if max_pair is None:
             print("训练提前结束，没有可合并的pair")
             break
 
-        #word_counts = update_word_counts(word_counts, max_pair)
-        update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair,changed_pairs)
-        vocab[len(vocab)]=max_pair[0] + max_pair[1]
-        merges.append(max_pair)#max_pair==(max_pair[0], max_pair[1])   eg('a','b')
+        # #word_counts = update_word_counts(word_counts, max_pair)
+        # update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair,changed_pairs)
+        # # vocab[len(vocab)]=max_pair[0] + max_pair[1]
+        # vocab[len(vocab)] = byte(max_pair)
+        # merges.append(max_pair)#max_pair==(max_pair[0], max_pair[1])   eg('a','b')
+        new_token_id=len(vocab)
+        left_id,right_id = max_pair
+        vocab[new_token_id]=vocab[left_id]+vocab[right_id]
+        update_pair_counts(word_counts, pair_counts, pair_to_words, max_pair,new_token_id, changed_pairs)
+        merge_id_pairs.append(max_pair)
+
+    merges = [
+        (vocab[left_id], vocab[right_id])
+        for left_id, right_id in merge_id_pairs
+    ]
     print(f"最终词表大小: {len(vocab)}")
     print(f"实际合并次数: {len(merges)}")
         #pair_counts = count_pairs(word_counts)
     return BPETokenizer(vocab, merges)
 
-def select_best_pair(pair_counts,candidates,current_max_freq):
+def select_best_pair(pair_counts,candidates,current_max_freq,vocab):
     #更新pair_counts后，删掉已经不存在的pair
     candidates={
         pair
@@ -225,7 +248,14 @@ def select_best_pair(pair_counts,candidates,current_max_freq):
         }
     if not candidates:
         return None,candidates,current_max_freq
-    best_pair=max(candidates)
+    best_pair = max(
+        candidates,
+        key=lambda pair: (
+            pair_counts[pair],
+            vocab[pair[0]],
+            vocab[pair[1]],
+        ),
+    )
     return best_pair,candidates,current_max_freq
 
 def count_pairs(word_counts):
@@ -239,8 +269,8 @@ def count_pairs(word_counts):
 #建立反向索引
 def build_pair_to_words(word_counts):
     pair_to_words={}
-    for word, count in word_counts.items():
-        for pair in zip(word[:-1], word[1:]):
+    for word in word_counts:
+        for pair in set(zip(word[:-1], word[1:])):#这里可以去重
             if pair not in pair_to_words:
                 pair_to_words[pair] = set()
             pair_to_words[pair].add(word)
@@ -274,7 +304,7 @@ def update_pair_to_words(pair_to_words,old_word,new_word):
             pair_to_words[pair] = set()
         pair_to_words[pair].add(new_word)
 
-def update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair,changed_pairs=None):
+def update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair,new_token_id,changed_pairs=None):
     affected_pairs=list(pair_to_words.get(max_pair,set()))
     for old_word in affected_pairs:
         counts=word_counts[old_word]
@@ -287,7 +317,7 @@ def update_pair_counts(word_counts,pair_counts,pair_to_words,max_pair,changed_pa
             if pair_counts[pair]==0:
                 del pair_counts[pair]
         #2 合并旧单词
-        new_word=merge_single_word(old_word,max_pair)
+        new_word=merge_single_word(old_word,max_pair,new_token_id)
         #3 更新反向索引
         update_pair_to_words(pair_to_words,old_word,new_word)
         #4 更新单词词频
@@ -309,12 +339,12 @@ def update_word_counts(word_counts, max_pair):
     return new_word_counts
 
 #word tuple格式
-def merge_single_word(word, max_pair):
+def merge_single_word(word, max_pair,new_token_id):
     new_word = []
     i = 0
     while i+1 < len(word):
         if (word[i],word[i+1])==max_pair:
-            new_word.append(word[i]+word[i+1])
+            new_word.append(new_token_id)
             i=i+2
         else:
             new_word.append(word[i])
@@ -416,7 +446,62 @@ import copy
 
 ############encoding and decoding
 
+def test_incremental_updates():
+    """Small self-test for pair counts and reverse-index updates."""
+    text = "abababab abcabc abcabc banana banana bandana hello hello world"
+    word_counts = process_text(text, [])
+    pair_counts = count_pairs(word_counts)
+    pair_to_words = build_pair_to_words(word_counts)
+    vocab = {i: bytes([i]) for i in range(256)}
+    changed_pairs = set()
 
+    current_max_freq = max(pair_counts.values(), default=0)
+    candidates = {
+        pair for pair, count in pair_counts.items()
+        if count == current_max_freq
+    }
+
+    for _ in range(30):
+        if not pair_counts:
+            break
+
+        expected = max(
+            pair_counts,
+            key=lambda pair: (
+                pair_counts[pair],
+                vocab[pair[0]],
+                vocab[pair[1]],
+            ),
+        )
+
+        candidates.update(changed_pairs)
+        changed_pairs.clear()
+
+        actual, candidates, current_max_freq = select_best_pair(
+            pair_counts,
+            candidates,
+            current_max_freq,
+            vocab,
+        )
+        assert actual == expected, (actual, expected)
+
+        new_token_id = len(vocab)
+        left_id, right_id = actual
+        vocab[new_token_id] = vocab[left_id] + vocab[right_id]
+
+        update_pair_counts(
+            word_counts,
+            pair_counts,
+            pair_to_words,
+            actual,
+            new_token_id,
+            changed_pairs,
+        )
+
+        assert pair_counts == count_pairs(word_counts)
+        assert pair_to_words == build_pair_to_words(word_counts)
+
+    print("增量更新测试通过")
 if __name__ == "__main__":
     input_path = "../data/TinyStoriesV2-GPT4-train.txt"
     #vocab_size = 50257
