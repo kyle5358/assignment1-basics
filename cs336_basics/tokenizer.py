@@ -18,16 +18,8 @@ class BPETokenizer:
         self.merges = merges
 
 import regex as re
-# import os
-# from multiprocessing import Pool
-# import multiprocessing
-# from cs336_basics.pretokenization_example import find_chunk_boundaries
-
 # 预编译正则
 PAT = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
-
-from collections import Counter
-
 
 #预分词 处理special token
 def pre_tokenization(text,special_tokens):
@@ -188,7 +180,7 @@ def train_bpe(input_path, vocab_size, special_tokens,num_chunks=1000):
         if not pair_counts:#有可能都合并完了，每个单词就一个token
             print("训练提前结束：pair_counts 已经为空")
             break
-        # ① 把上一轮变化的 pair 加入候选集合
+        # 把上一轮变化的 pair 加入候选集合
         candidates.update(changed_pairs)
         changed_pairs.clear()
 
@@ -359,157 +351,152 @@ def counting_init_single(input_path, special_tokens):
 
     return process_text(text, special_tokens)
 
-
-# single = counting_init_single(input_path, special_tokens)
-# parallel = counting_init(input_path, special_tokens)
-#
-# print(single == parallel)
-
-import copy
-
-# def test_candidate_algorithm():
-#     # 1. 构造小型测试语料，不读 2GB 文件
-#     text = (
-#         "abababab abcabc abcabc "
-#         "banana banana bandana "
-#         "hello hello world world "
-#         "abab abc abc banana"
-#     )
-#
-#     word_counts = process_text(text, [])
-#
-#     pair_counts = count_pairs(word_counts)
-#     pair_to_words = build_pair_to_words(word_counts)
-#
-#     changed_pairs = set()
-#
-#     current_max_freq = max(pair_counts.values(), default=0)
-#     candidates = {
-#         pair
-#         for pair, count in pair_counts.items()
-#         if count == current_max_freq
-#     }
-#
-#     # 2. 逐轮比较
-#     for step in range(30):
-#         if not pair_counts:
-#             print("所有 pair 已合并完毕")
-#             break
-#
-#         # 原始全量扫描：作为正确答案
-#         expected = max(
-#             pair_counts,
-#             key=lambda pair: (pair_counts[pair], pair)
-#         )
-#
-#         # 候选集合优化算法
-#         candidates.update(changed_pairs)
-#         changed_pairs.clear()
-#
-#         actual, candidates, current_max_freq = select_best_pair(
-#             pair_counts,
-#             candidates,
-#             current_max_freq
-#         )
-#
-#         assert actual == expected, (
-#             f"第 {step + 1} 轮选择不一致！\n"
-#             f"原始算法：{expected}\n"
-#             f"优化算法：{actual}"
-#         )
-#
-#         # 执行同一轮合并
-#         update_pair_counts(
-#             word_counts,
-#             pair_counts,
-#             pair_to_words,
-#             actual,
-#             changed_pairs
-#         )
-#
-#         # 验证增量 pair 统计
-#         assert pair_counts == count_pairs(word_counts), (
-#             f"第 {step + 1} 轮 pair_counts 错误"
-#         )
-#
-#         # 验证倒排索引
-#         assert pair_to_words == build_pair_to_words(word_counts), (
-#             f"第 {step + 1} 轮 pair_to_words 错误"
-#         )
-#
-#         print(f"第 {step + 1} 轮通过：{actual}")
-#
-#     print("所有候选集合测试均通过！")
-
-# if __name__ == "__main__":
-#     test_candidate_algorithm()
-
 ############encoding and decoding
+def merge_tokens(tokens,pair):
+    new_tokens=[]
+    i=0
 
-def test_incremental_updates():
-    """Small self-test for pair counts and reverse-index updates."""
-    text = "abababab abcabc abcabc banana banana bandana hello hello world"
-    word_counts = process_text(text, [])
-    pair_counts = count_pairs(word_counts)
-    pair_to_words = build_pair_to_words(word_counts)
-    vocab = {i: bytes([i]) for i in range(256)}
-    changed_pairs = set()
+    while i<len(tokens):
+        if(i+1<len(tokens) and (tokens[i],tokens[i+1])==pair):
+            new_tokens.append(tokens[i]+tokens[i+1])
+            i+=2
+        else:
+            new_tokens.append(tokens[i])
+            i+=1
 
-    current_max_freq = max(pair_counts.values(), default=0)
-    candidates = {
-        pair for pair, count in pair_counts.items()
-        if count == current_max_freq
+    return new_tokens
+
+import json
+
+class Tokenizer:
+    def __init__(self, vocab, merges,special_tokens=None):
+        self.vocab = vocab
+        self.merges = merges
+        self.token_to_id = {
+            token_bytes: token_id
+            for token_id, token_bytes in self.vocab.items()
+        }
+        self.special_tokens=special_tokens or []
+
+        next_id=max(self.vocab,default=-1)+1
+
+        for token in self.special_tokens:
+            token_bytes=token.encode('utf8')
+
+            if token_bytes not in self.token_to_id:
+                self.vocab[next_id]=token_bytes
+                self.token_to_id[token_bytes]=next_id
+                next_id += 1
+        self.bpe_ranks={bpe:id for id,bpe in enumerate(self.merges)}
+
+    def _encode_piece(self,text):
+        text_bytes=text.encode('utf8')
+        #如果整个单词都在vocab
+        if text_bytes in self.token_to_id:
+            return [self.token_to_id[text_bytes]]
+
+        tokens=[bytes([i]) for i in text_bytes]
+
+        while len(tokens)>1:
+            pairs=[(tokens[i],tokens[i+1]) for i in range(len(tokens)-1)]
+            best_pair=min(pairs,key=lambda p:self.bpe_ranks.get(p,float('inf')))
+
+            if best_pair not in self.bpe_ranks:
+                break
+
+            tokens=merge_tokens(tokens,best_pair)
+        return[self.token_to_id[token] for token in tokens]
+
+    def encode(self,text):
+        result=[]
+        special_set=set(self.special_tokens)
+
+        pieces=pre_tokenization(text,self.special_tokens)
+        for piece in pieces:
+            if piece in special_set:
+                token_bytes = piece.encode("utf-8")
+                result.append(self.token_to_id[token_bytes])
+            else:
+                result.extend(self._encode_piece(piece))
+        return result
+
+    def decode(self,ids):
+        text_bytes=b"".join(self.vocab[token_id] for token_id in ids)
+        return text_bytes.decode("utf-8",errors="replace")
+
+    def encode_iterable(self,iterable):
+        for text in iterable:
+            yield from self.encode(text)
+
+    @classmethod
+    def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
+
+        # 1. 读取 vocab
+        with open(vocab_filepath, "r", encoding="utf-8") as f:
+            raw_vocab = json.load(f)
+
+            # JSON value 是整数列表，需要恢复成 bytes
+            vocab = {
+                int(k): bytes(v)
+                for k, v in raw_vocab.items()
+            }
+
+        # 2. 读取 merges
+        merges = []
+
+        with open(merges_filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                parts = line.split()
+
+                if len(parts) == 2:
+                    p0 = bytes(map(int, parts[0].split(",")))
+                    p1 = bytes(map(int, parts[1].split(",")))
+
+                    merges.append((p0, p1))
+
+
+        # 3. 创建 Tokenizer 对象
+        return cls(vocab, merges, special_tokens) #等价于return Tokenizer(vocab, merges, special_tokens)，但是可以用与子类的共享函数灵活
+    
+if __name__ == "__main__":
+    vocab = {
+        0: b"h",
+        1: b"e",
+        2: b"l",
+        3: b"o",
+        4: b"he",
+        5: b"ll",
+        6: b"llo",
     }
 
-    for _ in range(30):
-        if not pair_counts:
-            break
+    merges = [
+        (b"h", b"e"),
+        (b"l", b"l"),
+        (b"ll", b"o"),
+    ]
 
-        expected = max(
-            pair_counts,
-            key=lambda pair: (
-                pair_counts[pair],
-                vocab[pair[0]],
-                vocab[pair[1]],
-            ),
-        )
+    tokenizer = Tokenizer(vocab, merges)
 
-        candidates.update(changed_pairs)
-        changed_pairs.clear()
+    text = "hello"
+    ids = tokenizer.encode(text)
+    decoded = tokenizer.decode(ids)
 
-        actual, candidates, current_max_freq = select_best_pair(
-            pair_counts,
-            candidates,
-            current_max_freq,
-            vocab,
-        )
-        assert actual == expected, (actual, expected)
+    print("编码结果:", ids)
+    print("解码结果:", decoded)
 
-        new_token_id = len(vocab)
-        left_id, right_id = actual
-        vocab[new_token_id] = vocab[left_id] + vocab[right_id]
-
-        update_pair_counts(
-            word_counts,
-            pair_counts,
-            pair_to_words,
-            actual,
-            new_token_id,
-            changed_pairs,
-        )
-
-        assert pair_counts == count_pairs(word_counts)
-        assert pair_to_words == build_pair_to_words(word_counts)
-
-    print("增量更新测试通过")
-if __name__ == "__main__":
-    input_path = "../data/TinyStoriesV2-GPT4-train.txt"
-    #vocab_size = 50257
-    # input_path = "../data/test.txt"
-    vocab_size = 257
-
-    special_tokens = ["<|endoftext|>"]
-    print(train_bpe(input_path, vocab_size, special_tokens))
+    assert decoded == text
+    # input_path = "../data/TinyStoriesV2-GPT4-train.txt"
+    # #vocab_size = 50257
+    # # input_path = "../data/test.txt"
+    # vocab_size = 257
+    #
+    # special_tokens = ["<|endoftext|>"]
+    # print(train_bpe(input_path, vocab_size, special_tokens))
 
     # word_counts = counting_init_single(input_path, special_tokens)
     # pair_counts = count_pairs(word_counts)
