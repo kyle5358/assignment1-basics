@@ -161,3 +161,21 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+
+# Data
+data/
+
+# Logs
+log/
+out/
+wandb/
+
+# profiler
+*.prof
